@@ -66,6 +66,7 @@ handle_mouse_event0() {
 
   # array holding the possible positions of the mouse pointer
   local -a pos
+  local -a end_pos # Track end of each line for fallback
 
   local -i i n x=0 y=1 cursor=$((${#cur_prompt}+$CURSOR+1))
   local Y
@@ -85,13 +86,14 @@ handle_mouse_event0() {
     esac
     while
       (( x >= mx )) && : ${pos[y]=$i}
+      (( end_pos[y]=$i )) # Track last char of line
       (( x >= COLUMNS )) && (( x=0, y++ ))
       (( n > 0 ))
     do
       (( x++, n-- ))
     done
   done
-  : ${pos[y]=$i} ${Y:=$y}
+  : ${pos[y]=$i} ${Y:=$y} ${end_pos[y]=$i}
 
   local mouse_CURSOR
   if ((my + Y - cy > y)); then
@@ -99,7 +101,10 @@ handle_mouse_event0() {
   elif ((my + Y - cy < 1)); then
     mouse_CURSOR=0
   else
-    mouse_CURSOR=$(($pos[my + Y - cy] - ${#cur_prompt} - 1))
+    local target_y=$((my + Y - cy))
+    # If pos unset (click past end), use end_pos
+    local target_pos=${pos[target_y]:-$end_pos[target_y]}
+    mouse_CURSOR=$(($target_pos - ${#cur_prompt} - 1))
   fi
 
   case $bt in
@@ -126,20 +131,48 @@ handle_mouse_event0() {
   esac
 }
 
-handle_mouse_event() {
+# SGR 1006 Handler
+handle_sgr_mouse_event() {
+  local last_status=$?
+  emulate -L zsh
+  local bt mx my char sgr_data
+  
+  # Read until M or m
+  while read -k char; do
+    sgr_data+=$char
+    [[ $char == [Mm] ]] && break
+  done
+  
+  # Parse b;x;y
+  local -a parts
+  parts=("${(@s/;/)${sgr_data[1,-2]}}")
+  bt=$parts[1]
+  mx=$parts[2]
+  my=$parts[3]
+  local type=$sgr_data[-1]
+  
+  # Check for Release (m)
+  if [[ $type == 'm' ]]; then
+     return
+  fi
+
+  # Call common logic
+  handle_mouse_logic $bt $mx $my $last_status
+}
+
+# Legacy X10/1000 Handler
+handle_mouse_event_x10() {
   local last_status=$?
   emulate -L zsh
   local bt mx my
 
-  # either xterm mouse tracking or bound xterm event
-  # read the event from the terminal
-  read -k bt # mouse button, x, y reported after \e[M
-  bt=$((#bt & 0x47))
-
+  read -k bt
   read -k mx
   read -k my
 
-  # Check if $mx is the ASCII character with code 24 (Ctrl-X)
+  # Decode X10/1000 encoding: Value = Byte - 32
+  bt=$((#bt - 32))
+
   if [[ "$mx" == "\x18" ]]; then
     # assume event is \E[M<btn>dired-button()(^X\EG<x><y>)
     read -k mx
@@ -148,29 +181,70 @@ handle_mouse_event() {
     (( my = #my - 31 ))
     (( mx = #mx - 31 ))
   else
-    # that's a VT200 mouse tracking event
     (( my = #my - 32 ))
     (( mx = #mx - 32 ))
   fi
-
-  if [[ $bt -eq 3 ]]; then
-    return  # Process on press, discard release
-  elif [[ $bt -eq 64 || $bt -eq 65 ]]; then
-    # Mouse wheel up/down: fallback to terminal scroll
-    # disable mouse reporting. Will be re-enabled in precmd
+  
+  # Filter scroll wheel (64, 65 in X10? Wait. Wheel is +64 in button code?)
+  # X10 Button 0=0(32), 1=1(33), 2=2(34).
+  # Wheel Up=64(96), Down=65(97).
+  # If bt was decoded by -32:
+  # Wheel Up=64. Wheel Down=65.
+  
+  if [[ $bt -eq 64 || $bt -eq 65 ]]; then
     print -n '\e[?1000l'
     return
   fi
-
-  handle_mouse_event0 $bt $mx $my $last_status
+  
+  handle_mouse_logic $bt $mx $my $last_status
 }
 
-zle -N handle_mouse_event
+# Common Logic for Click/Drag
+handle_mouse_logic() {
+  local bt=$1 mx=$2 my=$3 last_status=$4
+  
+  # Handle Drag events (bit 5 set, +32)
+  if (( bt & 32 )); then
+    local drag_btn=$(( bt & ~32 ))
+    # Only drag with Left Button (0)
+    if [[ $drag_btn -eq 0 ]]; then
+       # If in tmux, trigger copy-mode on drag
+       if [[ -n "$TMUX" ]]; then
+         # Check if we are already in copy mode? No easy way.
+         # Just trigger it.
+         tmux copy-mode
+         return
+       fi
+       
+       handle_mouse_event0 $drag_btn $mx $my $last_status
+       REGION_ACTIVE=1
+    fi
+    return
+  fi
+
+  # Handle Click events
+  if [[ $bt -eq 0 ]]; then
+    handle_mouse_event0 $bt $mx $my $last_status
+    MARK=CURSOR
+    REGION_ACTIVE=0
+  else
+    handle_mouse_event0 $bt $mx $my $last_status
+  fi
+}
+
+zle -N handle_mouse_event_x10
+zle -N handle_sgr_mouse_event
 
 zmodload -i zsh/parameter # needed for $functions
-functions[precmd]+='print -n '\''\e[?1000h'\'
-functions[preexec]+='print -n '\''\e[?1000l'\'
+# Enable 1002 (Drag) and 1006 (SGR).
+functions[precmd]+='print -n '\''\e[?1002;1006h'\'
+functions[preexec]+='print -n '\''\e[?1002;1006l'\'
 
-bindkey -M emacs '\e[M' handle_mouse_event
-bindkey -M viins '\e[M' handle_mouse_event
-bindkey -M vicmd '\e[M' handle_mouse_event
+bindkey -M emacs '\e[M' handle_mouse_event_x10
+bindkey -M viins '\e[M' handle_mouse_event_x10
+bindkey -M vicmd '\e[M' handle_mouse_event_x10
+
+# Bind SGR Subevent
+bindkey -M emacs '\e[<' handle_sgr_mouse_event
+bindkey -M viins '\e[<' handle_sgr_mouse_event
+bindkey -M vicmd '\e[<' handle_sgr_mouse_event
