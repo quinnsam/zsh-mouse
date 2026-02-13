@@ -37,18 +37,26 @@ handle_mouse_event0() {
     (start) cur_prompt=$PS1;;
   esac
 
-  # if promptsubst, then we need first to do the expansions (to
-  # be able to remove the visual effects) and disable further
-  # expansions
-  if [[ -o promptsubst ]]; then
-    cur_prompt=${${(e)cur_prompt}//(#b)([\\\$\`])/\\$match}
-  fi
-
-  # restore the exit status in case $PS<n> relies on it
+  # New logic: Expand prompt fully, then strip ANSI codes
+  # This handles promptsubst and %F colors correctly
   set-status $last_status
-
-  # remove the visual effects and do the prompt expansion
-  cur_prompt=${(S%%)cur_prompt//(#b)(%([BSUbsu]|{*%})|(%[^BSUbsu{}]))/$match[3]}
+  # Perform parameter expansion and command substitution (handle $(...))
+  cur_prompt=${(e)cur_prompt}
+  # Perform prompt expansion (handle %F, %~)
+  cur_prompt=${(%)cur_prompt}
+  # Strip CSI sequences (ending in a letter)
+  cur_prompt=${cur_prompt//$'\e'[\[][0-9;]#[a-zA-Z]/}
+  # Strip OSC sequences (Title bar), ending with BEL (\a)
+  cur_prompt=${cur_prompt//$'\e'\][^$'\a']#$'\a'/}
+  # Strip OSC sequences ending with ST (\e\)
+  cur_prompt=${cur_prompt//$'\e'\][^$'\e']#$'\e'\\/}
+  # Strip APC/Title sequences ending with ST (\ek...\e\)
+  cur_prompt=${cur_prompt//$'\e'k[^$'\e']#$'\e'\\/}
+  # Strip Charset selection (e.g. \e(0, \e(B)
+  cur_prompt=${cur_prompt//$'\e'[()][0-9B]/}
+  # Strip Shift-In/Shift-Out (SI/SO) \x0E \x0F
+  cur_prompt=${cur_prompt//$'\x0e'/}
+  cur_prompt=${cur_prompt//$'\x0f'/}
 
   # we're now looping over the whole editing buffer (plus the last
   # line of the prompt) to compute the (x,y) position of each char. We
@@ -72,11 +80,8 @@ handle_mouse_event0() {
         (( y++, x=0 ));;
       ($'\t') # tab advance til next tab stop
         (( x = x/8*8+8 ));;
-      ([$'\0'-$'\037'$'\200'-$'\237'])
-        # characters like ^M
-        n=2;;
       (*)
-        n=1;;
+        n=${(m)#buf[i]};;
     esac
     while
       (( x >= mx )) && : ${pos[y]=$i}
