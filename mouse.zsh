@@ -185,24 +185,23 @@ handle_mouse_event_x10() {
     (( mx = #mx - 32 ))
   fi
   
-  # Filter scroll wheel (64, 65 in X10? Wait. Wheel is +64 in button code?)
-  # X10 Button 0=0(32), 1=1(33), 2=2(34).
-  # Wheel Up=64(96), Down=65(97).
-  # If bt was decoded by -32:
-  # Wheel Up=64. Wheel Down=65.
-  
-  if [[ $bt -eq 64 || $bt -eq 65 ]]; then
-    print -n '\e[?1000l'
-    return
-  fi
-  
+  # Scroll wheel events: Wheel Up=64, Down=65 (after -32 decode).
+  # Route through handle_mouse_logic so tmux copy-mode is triggered.
   handle_mouse_logic $bt $mx $my $last_status
 }
 
-# Common Logic for Click/Drag
+# Common Logic for Click/Drag/Scroll
 handle_mouse_logic() {
   local bt=$1 mx=$2 my=$3 last_status=$4
-  
+
+  # Handle Scroll Wheel events (bt 64=up, 65=down)
+  if (( bt == 64 || bt == 65 )); then
+    if [[ -n "$TMUX" ]]; then
+      tmux copy-mode
+    fi
+    return
+  fi
+
   # Handle Drag events (bit 5 set, +32)
   if (( bt & 32 )); then
     local drag_btn=$(( bt & ~32 ))
@@ -210,12 +209,10 @@ handle_mouse_logic() {
     if [[ $drag_btn -eq 0 ]]; then
        # If in tmux, trigger copy-mode on drag
        if [[ -n "$TMUX" ]]; then
-         # Check if we are already in copy mode? No easy way.
-         # Just trigger it.
          tmux copy-mode
          return
        fi
-       
+
        handle_mouse_event0 $drag_btn $mx $my $last_status
        REGION_ACTIVE=1
     fi
